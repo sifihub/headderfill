@@ -6,8 +6,6 @@ import os
 import re
 import shutil
 import subprocess
-import random
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,15 +15,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager, ChromeType
 
-# ===== OPTIONAL UC =====
-try:
-    import undetected_chromedriver as uc
-    UC_AVAILABLE = True
-except Exception:
-    uc = None
-    UC_AVAILABLE = False
 
-# ===== DEFAULTS =====
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -46,22 +36,35 @@ DEFAULT_FINGERPRINT = {
     "device_scale_factor": 1,
 }
 
-# ===== CONFIG =====
+# Edit this configuration block to change Zara's browser bootstrap in one place.
+CHROME_OPTIONS_CLASS = Options
+WEBDRIVER_FACTORY = webdriver.Chrome
+ACTION_CHAINS_CLASS = ActionChains
+DRIVER_SERVICE_CLASS = Service
+DRIVER_MANAGER_CLASS = ChromeDriverManager
+DRIVER_CHROME_TYPE = ChromeType.CHROMIUM
 STATIC_CHROME_ARGUMENTS = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
+    "--password-store=basic",
     "--disable-blink-features=AutomationControlled",
     "--disable-infobars",
     "--disable-extensions",
     "--disable-gpu",
+    "--renderer-process-limit=1",
+    "--max-old-space-size=512",
+    "--js-flags=--max-old-space-size=512",
     "--disable-background-networking",
     "--disable-default-apps",
     "--disable-sync",
+    "--window-position=0,0",
     "--no-first-run",
     "--no-default-browser-check",
-    "--disable-features=IsolateOrigins,site-per-process",
-    "--disable-site-isolation-trials",
 ]
+EXTRA_CHROME_ARGUMENTS: list[str] = []
+EXTRA_BINARY_CANDIDATES: list[str] = []
+FORCE_WINDOW_SIZE_AFTER_START: tuple[int, int] | None = None
+
 
 @dataclass
 class BrowserBootstrap:
@@ -70,154 +73,391 @@ class BrowserBootstrap:
     browser_version: str | None
     window_size: tuple[int, int]
 
-# ===== HELPERS =====
-def human_delay(a=0.5, b=2.0):
-    time.sleep(random.uniform(a, b))
 
-def randomize_fingerprint(fp: dict) -> dict:
-    fp = dict(fp)
-    fp["hardware_concurrency"] = random.choice([4, 6, 8, 12])
-    fp["device_memory"] = random.choice([4, 8, 16])
-    fp["window_width"] += random.randint(-40, 40)
-    fp["window_height"] += random.randint(-40, 40)
-    return fp
+def new_actions(driver: webdriver.Chrome) -> ActionChains:
+    return ACTION_CHAINS_CLASS(driver)
+
+
+def build_webdriver_kwargs(service: Service, options: Options) -> dict:
+    return {"service": service, "options": options}
+
+
+def parse_env_list(raw: str) -> list[str]:
+    if not raw:
+        return []
+    items: list[str] = []
+    for chunk in raw.replace("\n", ",").replace(";", ",").split(","):
+        value = chunk.strip()
+        if value:
+            items.append(value)
+    return items
+
+
+def parse_window_size(raw: str) -> tuple[int, int] | None:
+    value = (raw or "").strip().lower()
+    if not value:
+        return None
+    match = re.match(r"^\s*(\d+)\s*[x,]\s*(\d+)\s*$", value)
+    if not match:
+        return None
+    width = max(320, int(match.group(1)))
+    height = max(320, int(match.group(2)))
+    return width, height
+
 
 def load_or_create_fingerprint(data_dir: Path) -> dict:
     fp_path = Path(data_dir) / "fingerprint.json"
     if fp_path.exists():
         try:
-            data = json.loads(fp_path.read_text())
-            if isinstance(data, dict):
-                return randomize_fingerprint(data)
-        except:
+            loaded = json.loads(fp_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = dict(DEFAULT_FINGERPRINT)
+                data.update(loaded)
+                if not isinstance(data.get("languages"), list) or not data["languages"]:
+                    data["languages"] = list(DEFAULT_FINGERPRINT["languages"])
+                return data
+        except Exception:
             pass
-    fp = randomize_fingerprint(DEFAULT_FINGERPRINT)
+    data = dict(DEFAULT_FINGERPRINT)
     fp_path.parent.mkdir(parents=True, exist_ok=True)
-    fp_path.write_text(json.dumps(fp, indent=2))
-    return fp
+    fp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return data
+
+
+def sync_user_agent(user_agent: str, browser_version: str | None) -> str:
+    ua = (user_agent or DEFAULT_UA).strip() or DEFAULT_UA
+    if not browser_version or "Chrome/" not in ua:
+        return ua
+    return re.sub(r"Chrome/\d+\.\d+\.\d+\.\d+", f"Chrome/{browser_version}", ua)
+
 
 def resolve_browser_binary(preferred_binary: str = "") -> str:
     candidates = [
         os.environ.get("ZARA_CHROMIUM_BINARY", "").strip(),
-        preferred_binary,
+        os.environ.get("CHROMIUM_PATH", "").strip(),
+        (preferred_binary or "").strip(),
     ]
-    for c in candidates:
-        if c and Path(c).exists():
-            return c
+    candidates.extend(str(Path(candidate).expanduser()) for candidate in EXTRA_BINARY_CANDIDATES if candidate)
+    candidates.extend(parse_env_list(os.environ.get("ZARA_EXTRA_BINARY_CANDIDATES", "")))
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
     return ""
 
-def build_options(profile_dir: Path, fingerprint: dict, browser_version=None, headless=True, preferred_binary=""):
-    options = Options()
 
-    binary = resolve_browser_binary(preferred_binary)
-    if binary:
-        options.binary_location = binary
+def profile_directory_name() -> str:
+    return os.environ.get("ZARA_PROFILE_DIRECTORY", "Default").strip() or "Default"
 
-    for arg in STATIC_CHROME_ARGUMENTS:
-        options.add_argument(arg)
 
-    proxy = os.environ.get("ZARA_PROXY", "").strip()
-    if proxy:
-        options.add_argument(f"--proxy-server={proxy}")
+def resolve_window_size(fingerprint: dict) -> tuple[int, int]:
+    override = parse_window_size(os.environ.get("ZARA_WINDOW_SIZE", ""))
+    if override:
+        return override
+    return (
+        int(fingerprint.get("window_width", DEFAULT_FINGERPRINT["window_width"])),
+        int(fingerprint.get("window_height", DEFAULT_FINGERPRINT["window_height"])),
+    )
 
-    options.add_argument(f"--user-agent={fingerprint['user_agent']}")
-    options.add_argument(f"--window-size={fingerprint['window_width']},{fingerprint['window_height']}")
-    options.add_argument(f"--lang={fingerprint['language']}")
-    options.add_argument(f"--user-data-dir={profile_dir}")
 
+def build_options(
+    profile_dir: Path,
+    fingerprint: dict,
+    browser_version: str | None = None,
+    *,
+    headless: bool = True,
+    preferred_binary: str = "",
+) -> Options:
+    options = CHROME_OPTIONS_CLASS()
+    browser_binary = resolve_browser_binary(preferred_binary)
+    if browser_binary:
+        options.binary_location = browser_binary
+    width, height = resolve_window_size(fingerprint)
+    for argument in STATIC_CHROME_ARGUMENTS:
+        options.add_argument(argument)
+    for argument in EXTRA_CHROME_ARGUMENTS:
+        if argument:
+            options.add_argument(argument)
+    for argument in parse_env_list(os.environ.get("ZARA_EXTRA_CHROME_ARGUMENTS", "")):
+        options.add_argument(argument)
+    options.add_argument(f"--user-agent={sync_user_agent(str(fingerprint.get('user_agent', DEFAULT_UA)), browser_version)}")
+    options.add_argument(f"--window-size={width},{height}")
+    options.add_argument(f"--lang={fingerprint.get('language', DEFAULT_FINGERPRINT['language'])}")
+    options.add_argument(f"--user-data-dir={Path(profile_dir).resolve()}")
+    options.add_argument(f"--profile-directory={profile_directory_name()}")
+    options.add_argument(f"--force-device-scale-factor={fingerprint.get('device_scale_factor', 1)}")
     if headless:
         options.add_argument("--headless=new")
-        options.add_argument("--hide-scrollbars")
-
     return options
 
-def detect_browser_version(options: Options):
-    try:
-        binary = options.binary_location or "chromium"
-        result = subprocess.run([binary, "--version"], capture_output=True, text=True)
-        match = re.search(r"(\d+\.\d+\.\d+\.\d+)", result.stdout)
+
+def detect_browser_version(options: Options, preferred_binary: str = "") -> str | None:
+    candidates = []
+    if options.binary_location:
+        candidates.append(options.binary_location)
+    browser_binary = resolve_browser_binary(preferred_binary)
+    if browser_binary:
+        candidates.append(browser_binary)
+    if os.name != "nt":
+        candidates.extend(
+            [
+                "/usr/bin/ungoogled-chromium",
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+                "/snap/bin/chromium",
+            ]
+        )
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if not Path(candidate).exists():
+            continue
+        try:
+            result = subprocess.run([candidate, "--version"], capture_output=True, text=True, timeout=10)
+        except Exception:
+            continue
+        raw = (result.stdout or result.stderr or "").strip()
+        match = re.search(r"(\d+\.\d+\.\d+\.\d+)", raw)
         if match:
             return match.group(1)
-    except:
-        pass
     return None
 
-def apply_stealth(driver, fingerprint, browser_version=None):
-    payload = json.dumps(fingerprint)
 
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": f"""
-        const fp = {payload};
+def clear_driver_cache_if_requested(logger: logging.Logger | None = None) -> None:
+    if os.environ.get("ZARA_CLEAR_WDM_CACHE", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+    cache_dir = Path.home() / ".wdm" / "drivers"
+    if not cache_dir.exists():
+        return
+    try:
+        shutil.rmtree(cache_dir)
+        if logger:
+            logger.info("Cleared webdriver-manager cache at %s", cache_dir)
+    except Exception as exc:
+        if logger:
+            logger.warning("Could not clear webdriver-manager cache at %s: %s", cache_dir, exc)
 
-        Object.defineProperty(navigator, 'webdriver', {{get: () => undefined}});
-        Object.defineProperty(navigator, 'platform', {{get: () => fp.platform}});
-        Object.defineProperty(navigator, 'language', {{get: () => fp.language}});
-        Object.defineProperty(navigator, 'languages', {{get: () => fp.languages}});
-        Object.defineProperty(navigator, 'hardwareConcurrency', {{get: () => fp.hardware_concurrency}});
-        Object.defineProperty(navigator, 'deviceMemory', {{get: () => fp.device_memory}});
 
-        window.chrome = {{
-            runtime: {{}},
-            loadTimes: function(){{}},
-            csi: function(){{}}
-        }};
+def cleanup_profile_runtime_artifacts(profile_dir: Path, logger: logging.Logger | None = None) -> None:
+    transient_names = {
+        "DevToolsActivePort",
+        "SingletonCookie",
+        "SingletonLock",
+        "SingletonSocket",
+        "lockfile",
+        "LOCK",
+    }
+    for path in Path(profile_dir).rglob("*"):
+        if not path.exists():
+            continue
+        name = path.name
+        if name not in transient_names and not name.startswith("Singleton"):
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+        except Exception as exc:
+            if logger:
+                logger.warning("Could not remove stale profile artifact %s: %s", path, exc)
 
-        const getParameter = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(param) {{
-            if (param === 37445) return "Intel Inc.";
-            if (param === 37446) return "Intel Iris OpenGL Engine";
-            return getParameter.call(this, param);
-        }};
 
-        const originalQuery = navigator.permissions.query;
-        navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications'
-                ? Promise.resolve({{ state: Notification.permission }})
-                : originalQuery(parameters)
-        );
+def resolve_driver_binary(installed_path: str) -> Path:
+    explicit_driver = os.environ.get("ZARA_DRIVER_BINARY", "").strip()
+    if explicit_driver:
+        explicit_path = Path(explicit_driver).expanduser().resolve()
+        if explicit_path.exists() and explicit_path.is_file():
+            return explicit_path
+    candidate = Path(installed_path)
+    exact_matches: list[Path] = []
+    fallback_matches: list[Path] = []
+    seen: set[str] = set()
 
-        Object.defineProperty(navigator, 'plugins', {{
-            get: () => [{{
-                name: "Chrome PDF Plugin",
-                filename: "internal-pdf-viewer",
-                description: "Portable Document Format"
-            }}]
-        }});
+    def looks_executable(path: Path) -> bool:
+        try:
+            head = path.read_bytes()[:4]
+        except OSError:
+            return False
+        return head.startswith(b"\x7fELF") or head.startswith(b"MZ") or head.startswith(b"#!")
 
-        Object.defineProperty(navigator, 'mediaDevices', {{
-            get: () => undefined
-        }});
-        """
-    })
+    def remember(path: Path, *, exact: bool) -> None:
+        key = str(path)
+        if key in seen or not path.exists() or not path.is_file():
+            return
+        seen.add(key)
+        name = path.name.lower()
+        if "chromedriver" not in name or "third_party_notices" in name or "license" in name:
+            return
+        if exact:
+            exact_matches.append(path)
+        else:
+            fallback_matches.append(path)
 
-def bootstrap_driver(profile_dir: Path, data_dir: Path, headless=True, preferred_binary="", logger=None):
-    profile_dir = Path(profile_dir)
-    profile_dir.mkdir(parents=True, exist_ok=True)
+    search_roots = [candidate.parent]
+    if candidate.parent.exists():
+        search_roots.extend(entry for entry in candidate.parent.iterdir() if entry.is_dir())
 
-    fingerprint = load_or_create_fingerprint(data_dir)
-    options = build_options(profile_dir, fingerprint, headless=headless, preferred_binary=preferred_binary)
-    browser_version = detect_browser_version(options)
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            name = path.name.lower()
+            if name in {"chromedriver", "chromedriver.exe"}:
+                remember(path, exact=True)
+            elif name.startswith("chromedriver"):
+                remember(path, exact=False)
 
-    driver_path = ChromeDriverManager().install()
-    service = Service(driver_path)
+    for path in exact_matches + fallback_matches:
+        if not looks_executable(path):
+            continue
+        if os.name != "nt":
+            mode = path.stat().st_mode
+            if not mode & 0o111:
+                path.chmod(mode | 0o755)
+        return path
 
-    if UC_AVAILABLE:
-        driver = uc.Chrome(
-            options=options,
-            use_subprocess=True,
-            driver_executable_path=driver_path,
-            version_main=int(browser_version.split(".")[0]) if browser_version else None,
+    raise FileNotFoundError(f"Unable to locate a usable chromedriver binary near {installed_path}")
+
+
+def apply_hardcoded_fingerprint(
+    driver: webdriver.Chrome,
+    fingerprint: dict,
+    browser_version: str | None = None,
+) -> None:
+    width, height = resolve_window_size(fingerprint)
+    scale = int(fingerprint.get("device_scale_factor", DEFAULT_FINGERPRINT["device_scale_factor"]))
+    language = str(fingerprint.get("language", DEFAULT_FINGERPRINT["language"]))
+    languages = fingerprint.get("languages", DEFAULT_FINGERPRINT["languages"])
+    if not isinstance(languages, list) or not languages:
+        languages = list(DEFAULT_FINGERPRINT["languages"])
+    payload = {
+        "user_agent": sync_user_agent(str(fingerprint.get("user_agent", DEFAULT_FINGERPRINT["user_agent"])), browser_version),
+        "language": language,
+        "languages": languages,
+        "platform": str(fingerprint.get("platform", DEFAULT_FINGERPRINT["platform"])),
+        "vendor": str(fingerprint.get("vendor", DEFAULT_FINGERPRINT["vendor"])),
+        "timezone": str(fingerprint.get("timezone", DEFAULT_FINGERPRINT["timezone"])),
+        "hardware_concurrency": int(fingerprint.get("hardware_concurrency", DEFAULT_FINGERPRINT["hardware_concurrency"])),
+        "device_memory": int(fingerprint.get("device_memory", DEFAULT_FINGERPRINT["device_memory"])),
+        "window_width": width,
+        "window_height": height,
+        "device_scale_factor": scale,
+    }
+    try:
+        driver.execute_cdp_cmd(
+            "Network.setUserAgentOverride",
+            {
+                "userAgent": payload["user_agent"],
+                "acceptLanguage": payload["language"],
+                "platform": payload["platform"],
+            },
         )
-    else:
-        driver = webdriver.Chrome(service=service, options=options)
+    except Exception:
+        pass
+    try:
+        driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {"timezoneId": payload["timezone"]})
+    except Exception:
+        pass
+    try:
+        driver.execute_cdp_cmd(
+            "Emulation.setDeviceMetricsOverride",
+            {
+                "width": payload["window_width"],
+                "height": payload["window_height"],
+                "deviceScaleFactor": payload["device_scale_factor"],
+                "mobile": False,
+            },
+        )
+    except Exception:
+        pass
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": f"""
+                const __headderfillFp = {json.dumps(payload)};
+                Object.defineProperty(navigator, 'webdriver', {{get: () => undefined}});
+                Object.defineProperty(navigator, 'platform', {{get: () => __headderfillFp.platform}});
+                Object.defineProperty(navigator, 'language', {{get: () => __headderfillFp.language}});
+                Object.defineProperty(navigator, 'languages', {{get: () => __headderfillFp.languages}});
+                Object.defineProperty(navigator, 'vendor', {{get: () => __headderfillFp.vendor}});
+                Object.defineProperty(navigator, 'hardwareConcurrency', {{get: () => __headderfillFp.hardware_concurrency}});
+                Object.defineProperty(navigator, 'deviceMemory', {{get: () => __headderfillFp.device_memory}});
+                Object.defineProperty(screen, 'width', {{get: () => __headderfillFp.window_width}});
+                Object.defineProperty(screen, 'height', {{get: () => __headderfillFp.window_height}});
+                Object.defineProperty(window, 'devicePixelRatio', {{get: () => __headderfillFp.device_scale_factor}});
+                const _resolvedOptions = Intl.DateTimeFormat.prototype.resolvedOptions;
+                Intl.DateTimeFormat.prototype.resolvedOptions = function(...args) {{
+                    const result = _resolvedOptions.apply(this, args);
+                    result.timeZone = __headderfillFp.timezone;
+                    return result;
+                }};
+                Object.defineProperty(navigator, 'plugins', {{get: () => [1, 2, 3, 4, 5]}});
+                window.chrome = window.chrome || {{runtime: {{}}}};
+            """
+        },
+    )
 
-    driver.set_window_size(fingerprint["window_width"], fingerprint["window_height"])
 
-    apply_stealth(driver, fingerprint, browser_version)
-
+def bootstrap_driver(
+    profile_dir: Path,
+    data_dir: Path,
+    *,
+    headless: bool = True,
+    preferred_binary: str = "",
+    logger: logging.Logger | None = None,
+) -> BrowserBootstrap:
+    profile_dir = Path(profile_dir).resolve()
+    data_dir = Path(data_dir).resolve()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    fingerprint = load_or_create_fingerprint(data_dir)
+    cleanup_profile_runtime_artifacts(profile_dir, logger=logger)
+    options = build_options(profile_dir, fingerprint, None, headless=headless, preferred_binary=preferred_binary)
+    browser_version = detect_browser_version(options, preferred_binary=preferred_binary)
+    clear_driver_cache_if_requested(logger=logger)
+    options = build_options(
+        profile_dir,
+        fingerprint,
+        browser_version,
+        headless=headless,
+        preferred_binary=preferred_binary,
+    )
+    manager_kwargs: dict[str, str | ChromeType] = {"chrome_type": DRIVER_CHROME_TYPE}
+    if browser_version:
+        manager_kwargs["driver_version"] = browser_version
+        if logger:
+            logger.info("Matching chromedriver to browser version %s", browser_version)
+    try:
+        installed_driver_path = DRIVER_MANAGER_CLASS(**manager_kwargs).install()
+    except Exception:
+        if not browser_version:
+            raise
+        major = browser_version.split(".", 1)[0]
+        if logger:
+            logger.warning(
+                "Exact chromedriver lookup failed for %s; retrying with major version %s",
+                browser_version,
+                major,
+            )
+        installed_driver_path = DRIVER_MANAGER_CLASS(driver_version=major, chrome_type=DRIVER_CHROME_TYPE).install()
+    driver_path = resolve_driver_binary(installed_driver_path)
+    if logger and str(driver_path) != installed_driver_path:
+        logger.warning("webdriver-manager returned %s; using %s instead", installed_driver_path, driver_path)
+    service = DRIVER_SERVICE_CLASS(executable_path=str(driver_path))
+    driver = WEBDRIVER_FACTORY(**build_webdriver_kwargs(service, options))
+    window_size = FORCE_WINDOW_SIZE_AFTER_START or resolve_window_size(fingerprint)
+    try:
+        driver.set_window_size(*window_size)
+    except Exception:
+        pass
+    apply_hardcoded_fingerprint(driver, fingerprint, browser_version=browser_version)
     return BrowserBootstrap(
         driver=driver,
         fingerprint=fingerprint,
         browser_version=browser_version,
-        window_size=(fingerprint["window_width"], fingerprint["window_height"]),
+        window_size=window_size,
     )
