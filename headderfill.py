@@ -36,6 +36,35 @@ DEFAULT_FINGERPRINT = {
     "device_scale_factor": 1,
 }
 
+# Edit this configuration block to change Zara's browser bootstrap in one place.
+CHROME_OPTIONS_CLASS = Options
+WEBDRIVER_FACTORY = webdriver.Chrome
+ACTION_CHAINS_CLASS = ActionChains
+DRIVER_SERVICE_CLASS = Service
+DRIVER_MANAGER_CLASS = ChromeDriverManager
+DRIVER_CHROME_TYPE = ChromeType.CHROMIUM
+STATIC_CHROME_ARGUMENTS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--password-store=basic",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-infobars",
+    "--disable-extensions",
+    "--disable-gpu",
+    "--renderer-process-limit=1",
+    "--max-old-space-size=512",
+    "--js-flags=--max-old-space-size=512",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--window-position=0,0",
+    "--no-first-run",
+    "--no-default-browser-check",
+]
+EXTRA_CHROME_ARGUMENTS: list[str] = []
+EXTRA_BINARY_CANDIDATES: list[str] = []
+FORCE_WINDOW_SIZE_AFTER_START: tuple[int, int] | None = None
+
 
 @dataclass
 class BrowserBootstrap:
@@ -46,7 +75,11 @@ class BrowserBootstrap:
 
 
 def new_actions(driver: webdriver.Chrome) -> ActionChains:
-    return ActionChains(driver)
+    return ACTION_CHAINS_CLASS(driver)
+
+
+def build_webdriver_kwargs(service: Service, options: Options) -> dict:
+    return {"service": service, "options": options}
 
 
 def parse_window_size(raw: str) -> tuple[int, int] | None:
@@ -93,6 +126,7 @@ def resolve_browser_binary(preferred_binary: str = "") -> str:
         os.environ.get("CHROMIUM_PATH", "").strip(),
         (preferred_binary or "").strip(),
     ]
+    candidates.extend(str(Path(candidate).expanduser()) for candidate in EXTRA_BINARY_CANDIDATES if candidate)
     for candidate in candidates:
         if candidate and Path(candidate).exists():
             return candidate
@@ -121,33 +155,22 @@ def build_options(
     headless: bool = True,
     preferred_binary: str = "",
 ) -> Options:
-    options = Options()
+    options = CHROME_OPTIONS_CLASS()
     browser_binary = resolve_browser_binary(preferred_binary)
     if browser_binary:
         options.binary_location = browser_binary
     width, height = resolve_window_size(fingerprint)
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--renderer-process-limit=1")
-    options.add_argument("--max-old-space-size=512")
-    options.add_argument("--js-flags=--max-old-space-size=512")
-    options.add_argument("--disable-background-networking")
-    options.add_argument("--disable-default-apps")
-    options.add_argument("--disable-sync")
+    for argument in STATIC_CHROME_ARGUMENTS:
+        options.add_argument(argument)
+    for argument in EXTRA_CHROME_ARGUMENTS:
+        if argument:
+            options.add_argument(argument)
     options.add_argument(f"--user-agent={sync_user_agent(str(fingerprint.get('user_agent', DEFAULT_UA)), browser_version)}")
     options.add_argument(f"--window-size={width},{height}")
     options.add_argument(f"--lang={fingerprint.get('language', DEFAULT_FINGERPRINT['language'])}")
     options.add_argument(f"--user-data-dir={Path(profile_dir).resolve()}")
     options.add_argument(f"--profile-directory={profile_directory_name()}")
-    options.add_argument("--password-store=basic")
     options.add_argument(f"--force-device-scale-factor={fingerprint.get('device_scale_factor', 1)}")
-    options.add_argument("--window-position=0,0")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
     if headless:
         options.add_argument("--headless=new")
     return options
@@ -384,13 +407,13 @@ def bootstrap_driver(
         headless=headless,
         preferred_binary=preferred_binary,
     )
-    manager_kwargs: dict[str, str | ChromeType] = {"chrome_type": ChromeType.CHROMIUM}
+    manager_kwargs: dict[str, str | ChromeType] = {"chrome_type": DRIVER_CHROME_TYPE}
     if browser_version:
         manager_kwargs["driver_version"] = browser_version
         if logger:
             logger.info("Matching chromedriver to browser version %s", browser_version)
     try:
-        installed_driver_path = ChromeDriverManager(**manager_kwargs).install()
+        installed_driver_path = DRIVER_MANAGER_CLASS(**manager_kwargs).install()
     except Exception:
         if not browser_version:
             raise
@@ -401,13 +424,13 @@ def bootstrap_driver(
                 browser_version,
                 major,
             )
-        installed_driver_path = ChromeDriverManager(driver_version=major, chrome_type=ChromeType.CHROMIUM).install()
+        installed_driver_path = DRIVER_MANAGER_CLASS(driver_version=major, chrome_type=DRIVER_CHROME_TYPE).install()
     driver_path = resolve_driver_binary(installed_driver_path)
     if logger and str(driver_path) != installed_driver_path:
         logger.warning("webdriver-manager returned %s; using %s instead", installed_driver_path, driver_path)
-    service = Service(executable_path=str(driver_path))
-    driver = webdriver.Chrome(service=service, options=options)
-    window_size = resolve_window_size(fingerprint)
+    service = DRIVER_SERVICE_CLASS(executable_path=str(driver_path))
+    driver = WEBDRIVER_FACTORY(**build_webdriver_kwargs(service, options))
+    window_size = FORCE_WINDOW_SIZE_AFTER_START or resolve_window_size(fingerprint)
     try:
         driver.set_window_size(*window_size)
     except Exception:
