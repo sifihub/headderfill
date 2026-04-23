@@ -139,9 +139,25 @@ def resolve_browser_binary(preferred_binary: str = "") -> str:
     ]
     candidates.extend(str(Path(candidate).expanduser()) for candidate in EXTRA_BINARY_CANDIDATES if candidate)
     candidates.extend(parse_env_list(os.environ.get("ZARA_EXTRA_BINARY_CANDIDATES", "")))
+    if os.name != "nt":
+        candidates.extend(
+            [
+                "/usr/bin/ungoogled-chromium",
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+                "/snap/bin/chromium",
+            ]
+        )
+        for command in ("ungoogled-chromium", "chromium", "chromium-browser"):
+            resolved = shutil.which(command)
+            if resolved:
+                candidates.append(resolved)
     for candidate in candidates:
-        if candidate and Path(candidate).exists():
-            return candidate
+        if not candidate:
+            continue
+        resolved_path = str(Path(candidate).expanduser())
+        if Path(resolved_path).exists():
+            return resolved_path
     return ""
 
 
@@ -206,6 +222,10 @@ def detect_browser_version(options: Options, preferred_binary: str = "") -> str 
                 "/snap/bin/chromium",
             ]
         )
+        for command in ("ungoogled-chromium", "chromium", "chromium-browser"):
+            resolved = shutil.which(command)
+            if resolved:
+                candidates.append(resolved)
 
     seen: set[str] = set()
     for candidate in candidates:
@@ -214,14 +234,15 @@ def detect_browser_version(options: Options, preferred_binary: str = "") -> str 
         seen.add(candidate)
         if not Path(candidate).exists():
             continue
-        try:
-            result = subprocess.run([candidate, "--version"], capture_output=True, text=True, timeout=10)
-        except Exception:
-            continue
-        raw = (result.stdout or result.stderr or "").strip()
-        match = re.search(r"(\d+\.\d+\.\d+\.\d+)", raw)
-        if match:
-            return match.group(1)
+        for version_arg in ("--version", "--product-version"):
+            try:
+                result = subprocess.run([candidate, version_arg], capture_output=True, text=True, timeout=10)
+            except Exception:
+                continue
+            raw = (result.stdout or result.stderr or "").strip()
+            match = re.search(r"(\d+\.\d+\.\d+\.\d+)", raw)
+            if match:
+                return match.group(1)
     return None
 
 
