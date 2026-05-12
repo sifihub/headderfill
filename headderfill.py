@@ -16,6 +16,8 @@ from selenium.webdriver.common.action_chains import ActionChains
 from webdriver_manager.chrome import ChromeDriverManager, ChromeType
 
 
+HEADDERFILL_VERSION = "sifihub-headderfill-live-2026-05-12"
+
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -435,6 +437,8 @@ def bootstrap_driver(
     profile_dir = Path(profile_dir).resolve()
     data_dir = Path(data_dir).resolve()
     profile_dir.mkdir(parents=True, exist_ok=True)
+    if logger:
+        logger.info("Using headderfill version %s", HEADDERFILL_VERSION)
     fingerprint = load_or_create_fingerprint(data_dir)
     cleanup_profile_runtime_artifacts(profile_dir, logger=logger)
     options = build_options(profile_dir, fingerprint, None, headless=headless, preferred_binary=preferred_binary)
