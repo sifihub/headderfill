@@ -13,7 +13,7 @@ def ensure_package(package_name, import_name=None):
     import_name = import_name or package_name
 
     try:
-        importlib.import_module(import_name)
+        return importlib.import_module(import_name)
 
     except ImportError:
         subprocess.check_call(
@@ -25,8 +25,10 @@ def ensure_package(package_name, import_name=None):
                 package_name,
             ]
         )
+        return importlib.import_module(import_name)
 
 
+ensure_package("setuptools")
 ensure_package("selenium")
 ensure_package(
     "undetected-chromedriver",
@@ -52,7 +54,7 @@ import undetected_chromedriver as uc
 from selenium.webdriver.common.action_chains import ActionChains
 
 
-HEADDERFILL_VERSION = "sifihub-headderfill-live-2026-05-13"
+HEADDERFILL_VERSION = "sifihub-headderfill-live-2026-05-13-fixed"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -119,6 +121,15 @@ class BrowserBootstrap:
 
 def new_actions(driver):
     return ACTION_CHAINS_CLASS(driver)
+
+
+def build_webdriver_kwargs(service=None, options=None) -> dict:
+    kwargs = {}
+    if service is not None:
+        kwargs["service"] = service
+    if options is not None:
+        kwargs["options"] = options
+    return kwargs
 
 
 # =========================================================
@@ -474,7 +485,17 @@ def cleanup_profile_runtime_artifacts(
                     "profile artifact %s: %s",
                     path,
                     exc,
-                )
+    )
+
+
+def profile_directory_name() -> str:
+    return (
+        os.environ.get(
+            "ZARA_PROFILE_DIRECTORY",
+            "Default",
+        ).strip()
+        or "Default"
+    )
 
 
 # =========================================================
@@ -542,7 +563,7 @@ def build_options(
     )
 
     options.add_argument(
-        "--profile-directory=Default"
+        f"--profile-directory={profile_directory_name()}"
     )
 
     options.add_argument(
@@ -663,6 +684,19 @@ def apply_hardcoded_fingerprint(
     fingerprint,
     browser_version=None,
 ):
+    width, height = resolve_window_size(fingerprint)
+    scale = int(
+        fingerprint.get(
+            "device_scale_factor",
+            DEFAULT_FINGERPRINT["device_scale_factor"],
+        )
+    )
+    languages = fingerprint.get(
+        "languages",
+        DEFAULT_FINGERPRINT["languages"],
+    )
+    if not isinstance(languages, list) or not languages:
+        languages = list(DEFAULT_FINGERPRINT["languages"])
 
     payload = {
         "user_agent": sync_user_agent(
@@ -694,6 +728,21 @@ def apply_hardcoded_fingerprint(
             "timezone",
             "Asia/Kolkata",
         ),
+        "hardware_concurrency": int(
+            fingerprint.get(
+                "hardware_concurrency",
+                DEFAULT_FINGERPRINT["hardware_concurrency"],
+            )
+        ),
+        "device_memory": int(
+            fingerprint.get(
+                "device_memory",
+                DEFAULT_FINGERPRINT["device_memory"],
+            )
+        ),
+        "window_width": width,
+        "window_height": height,
+        "device_scale_factor": scale,
     }
 
     try:
@@ -715,27 +764,69 @@ def apply_hardcoded_fingerprint(
     except Exception:
         pass
 
-    driver.execute_cdp_cmd(
-        "Page.addScriptToEvaluateOnNewDocument",
-        {
-            "source": f"""
-                const fp = {json.dumps(payload)};
+    try:
+        driver.execute_cdp_cmd(
+            "Emulation.setTimezoneOverride",
+            {
+                "timezoneId": payload[
+                    "timezone"
+                ]
+            },
+        )
 
-                Object.defineProperty(
-                    navigator,
-                    'webdriver',
-                    {{
-                        get: () => undefined
-                    }}
-                );
+    except Exception:
+        pass
 
-                window.chrome =
-                    window.chrome || {{
-                        runtime: {{}}
+    try:
+        driver.execute_cdp_cmd(
+            "Emulation.setDeviceMetricsOverride",
+            {
+                "width": payload[
+                    "window_width"
+                ],
+                "height": payload[
+                    "window_height"
+                ],
+                "deviceScaleFactor": payload[
+                    "device_scale_factor"
+                ],
+                "mobile": False,
+            },
+        )
+
+    except Exception:
+        pass
+
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": f"""
+                    const fp = {json.dumps(payload)};
+                    Object.defineProperty(navigator, 'webdriver', {{get: () => undefined}});
+                    Object.defineProperty(navigator, 'platform', {{get: () => fp.platform}});
+                    Object.defineProperty(navigator, 'language', {{get: () => fp.language}});
+                    Object.defineProperty(navigator, 'languages', {{get: () => fp.languages}});
+                    Object.defineProperty(navigator, 'vendor', {{get: () => fp.vendor}});
+                    Object.defineProperty(navigator, 'hardwareConcurrency', {{get: () => fp.hardware_concurrency}});
+                    Object.defineProperty(navigator, 'deviceMemory', {{get: () => fp.device_memory}});
+                    Object.defineProperty(screen, 'width', {{get: () => fp.window_width}});
+                    Object.defineProperty(screen, 'height', {{get: () => fp.window_height}});
+                    Object.defineProperty(window, 'devicePixelRatio', {{get: () => fp.device_scale_factor}});
+                    const resolvedOptions = Intl.DateTimeFormat.prototype.resolvedOptions;
+                    Intl.DateTimeFormat.prototype.resolvedOptions = function(...args) {{
+                        const result = resolvedOptions.apply(this, args);
+                        result.timeZone = fp.timezone;
+                        return result;
                     }};
-            """
-        },
-    )
+                    Object.defineProperty(navigator, 'plugins', {{get: () => [1, 2, 3, 4, 5]}});
+                    window.chrome = window.chrome || {{runtime: {{}}}};
+                """
+            },
+        )
+
+    except Exception:
+        pass
 
 
 # =========================================================
