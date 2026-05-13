@@ -570,6 +570,14 @@ def build_options(
         f"{fingerprint.get('device_scale_factor', 1)}"
     )
 
+    try:
+        options.set_capability(
+            "goog:loggingPrefs",
+            {"performance": "ALL"},
+        )
+    except Exception:
+        pass
+
     if headless:
         options.add_argument(
             "--headless=new"
