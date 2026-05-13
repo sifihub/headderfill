@@ -481,11 +481,10 @@ def cleanup_profile_runtime_artifacts(
 
             if logger:
                 logger.warning(
-                    "Could not remove "
-                    "profile artifact %s: %s",
+                    "Could not remove profile artifact %s: %s",
                     path,
                     exc,
-    )
+                )
 
 
 def profile_directory_name() -> str:
