@@ -16,17 +16,17 @@ import undetected_chromedriver as uc
 from selenium.webdriver.common.action_chains import ActionChains
 
 
-HEADDERFILL_VERSION = "sifihub-headderfill-uc-template-2026-05-13"
+HEADDERFILL_VERSION = "sifihub-headderfill-live-2026-05-13"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/145.0.0.0 Safari/537.36"
+    "Chrome/122.0.0.0 Safari/537.36"
 )
 
 DEFAULT_FINGERPRINT = {
     "user_agent": DEFAULT_UA,
-    "window_width": 1354,
+    "window_width": 1345,
     "window_height": 610,
     "timezone": "Asia/Kolkata",
     "language": "en-US",
@@ -39,7 +39,7 @@ DEFAULT_FINGERPRINT = {
 }
 
 # =========================================================
-# CONFIGURATION
+# ORIGINAL TEMPLATE STRUCTURE PRESERVED
 # =========================================================
 
 CHROME_OPTIONS_CLASS = uc.ChromeOptions
@@ -50,11 +50,13 @@ STATIC_CHROME_ARGUMENTS = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
     "--password-store=basic",
-    "--use-mock-keychain",
     "--disable-blink-features=AutomationControlled",
     "--disable-infobars",
     "--disable-extensions",
     "--disable-gpu",
+    "--renderer-process-limit=1",
+    "--max-old-space-size=512",
+    "--js-flags=--max-old-space-size=512",
     "--disable-background-networking",
     "--disable-default-apps",
     "--disable-sync",
@@ -64,30 +66,18 @@ STATIC_CHROME_ARGUMENTS = [
 ]
 
 EXTRA_CHROME_ARGUMENTS: list[str] = []
-
-EXTRA_BINARY_CANDIDATES = [
-    "/home/dhruv/squashfs-root/AppRun",
-    "/home/dhruv/Downloads/ungoogled-chromium-145.0.7632.159-1-x86_64.AppImage",
-]
+EXTRA_BINARY_CANDIDATES: list[str] = []
 
 FORCE_WINDOW_SIZE_AFTER_START: tuple[int, int] | None = None
 
-# =========================================================
-# DATA CLASS
-# =========================================================
 
 @dataclass
 class BrowserBootstrap:
     driver: uc.Chrome
     fingerprint: dict
     browser_version: str | None
-    browser_major_version: int | None
     window_size: tuple[int, int]
 
-
-# =========================================================
-# HELPERS
-# =========================================================
 
 def new_actions(driver):
     return ACTION_CHAINS_CLASS(driver)
@@ -97,10 +87,11 @@ def parse_env_list(raw: str) -> list[str]:
     if not raw:
         return []
 
-    items = []
+    items: list[str] = []
 
     for chunk in raw.replace("\n", ",").replace(";", ",").split(","):
         value = chunk.strip()
+
         if value:
             items.append(value)
 
@@ -124,39 +115,39 @@ def parse_window_size(raw: str) -> tuple[int, int] | None:
     return width, height
 
 
-def resolve_window_size(fingerprint: dict) -> tuple[int, int]:
-    override = parse_window_size(os.getenv("ZARA_WINDOW_SIZE", ""))
-
-    if override:
-        return override
-
-    return (
-        int(fingerprint.get("window_width", DEFAULT_FINGERPRINT["window_width"])),
-        int(fingerprint.get("window_height", DEFAULT_FINGERPRINT["window_height"])),
-    )
-
-
 def load_or_create_fingerprint(data_dir: Path) -> dict:
     fp_path = Path(data_dir) / "fingerprint.json"
 
     if fp_path.exists():
         try:
-            loaded = json.loads(fp_path.read_text(encoding="utf-8"))
+            loaded = json.loads(
+                fp_path.read_text(encoding="utf-8")
+            )
 
             if isinstance(loaded, dict):
                 data = dict(DEFAULT_FINGERPRINT)
+
                 data.update(loaded)
 
-                if not isinstance(data.get("languages"), list) or not data["languages"]:
-                    data["languages"] = list(DEFAULT_FINGERPRINT["languages"])
+                if (
+                    not isinstance(data.get("languages"), list)
+                    or not data["languages"]
+                ):
+                    data["languages"] = list(
+                        DEFAULT_FINGERPRINT["languages"]
+                    )
 
                 return data
+
         except Exception:
             pass
 
     data = dict(DEFAULT_FINGERPRINT)
 
-    fp_path.parent.mkdir(parents=True, exist_ok=True)
+    fp_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     fp_path.write_text(
         json.dumps(data, indent=2),
@@ -166,7 +157,11 @@ def load_or_create_fingerprint(data_dir: Path) -> dict:
     return data
 
 
-def sync_user_agent(user_agent: str, browser_version: str | None) -> str:
+def sync_user_agent(
+    user_agent: str,
+    browser_version: str | None,
+) -> str:
+
     ua = (user_agent or DEFAULT_UA).strip() or DEFAULT_UA
 
     if not browser_version or "Chrome/" not in ua:
@@ -179,56 +174,117 @@ def sync_user_agent(user_agent: str, browser_version: str | None) -> str:
     )
 
 
-# =========================================================
-# BROWSER BINARY
-# =========================================================
+def resolve_browser_binary(
+    preferred_binary: str = "",
+) -> str:
 
-def resolve_browser_binary(preferred_binary: str = "") -> str:
     candidates = [
-        os.getenv("CHROMIUM_PATH", "").strip(),
+        os.environ.get(
+            "ZARA_CHROMIUM_BINARY",
+            "",
+        ).strip(),
+
+        os.environ.get(
+            "CHROMIUM_PATH",
+            "",
+        ).strip(),
+
         preferred_binary.strip(),
     ]
 
-    candidates.extend(EXTRA_BINARY_CANDIDATES)
+    candidates.extend(
+        str(Path(candidate).expanduser())
+        for candidate in EXTRA_BINARY_CANDIDATES
+        if candidate
+    )
 
     candidates.extend(
         parse_env_list(
-            os.getenv("ZARA_EXTRA_BINARY_CANDIDATES", "")
+            os.environ.get(
+                "ZARA_EXTRA_BINARY_CANDIDATES",
+                "",
+            )
         )
     )
 
-    candidates.extend(
-        [
-            "/usr/bin/ungoogled-chromium",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-        ]
-    )
+    if os.name != "nt":
 
-    for command in (
-        "ungoogled-chromium",
-        "chromium",
-        "chromium-browser",
-        "google-chrome",
-        "google-chrome-stable",
-    ):
-        resolved = shutil.which(command)
+        candidates.extend(
+            [
+                "/usr/bin/ungoogled-chromium",
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+                "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable",
+                "/snap/bin/chromium",
+            ]
+        )
 
-        if resolved:
-            candidates.append(resolved)
+        for command in (
+            "ungoogled-chromium",
+            "chromium",
+            "chromium-browser",
+            "google-chrome",
+            "google-chrome-stable",
+        ):
+            resolved = shutil.which(command)
+
+            if resolved:
+                candidates.append(resolved)
 
     for candidate in candidates:
+
         if not candidate:
             continue
 
-        expanded = str(Path(candidate).expanduser())
+        resolved_path = str(
+            Path(candidate).expanduser()
+        )
 
-        if Path(expanded).exists():
-            return expanded
+        if Path(resolved_path).exists():
+            return resolved_path
 
     return ""
+
+
+def profile_directory_name() -> str:
+    return (
+        os.environ.get(
+            "ZARA_PROFILE_DIRECTORY",
+            "Default",
+        ).strip()
+        or "Default"
+    )
+
+
+def resolve_window_size(
+    fingerprint: dict,
+) -> tuple[int, int]:
+
+    override = parse_window_size(
+        os.environ.get(
+            "ZARA_WINDOW_SIZE",
+            "",
+        )
+    )
+
+    if override:
+        return override
+
+    return (
+        int(
+            fingerprint.get(
+                "window_width",
+                DEFAULT_FINGERPRINT["window_width"],
+            )
+        ),
+        int(
+            fingerprint.get(
+                "window_height",
+                DEFAULT_FINGERPRINT["window_height"],
+            )
+        ),
+    )
 
 
 # =========================================================
@@ -238,8 +294,10 @@ def resolve_browser_binary(preferred_binary: str = "") -> str:
 def pid_is_alive(pid):
     try:
         os.kill(pid, 0)
+
     except ProcessLookupError:
         return False
+
     except PermissionError:
         return True
 
@@ -251,6 +309,7 @@ def singleton_lock_owner(profile_dir):
 
     try:
         target = os.readlink(lock_path)
+
     except OSError:
         return None, None
 
@@ -261,6 +320,7 @@ def singleton_lock_owner(profile_dir):
 
     try:
         return host, int(pid_text)
+
     except ValueError:
         return host, None
 
@@ -273,69 +333,12 @@ def profile_has_live_lock(profile_dir):
 
     current_host = socket.gethostname()
 
-    same_host = host in {current_host, "localhost"}
-
-    return same_host and pid_is_alive(pid), pid
-
-
-def cleanup_profile_runtime_artifacts(
-    profile_dir: Path,
-    logger: logging.Logger | None = None,
-    quiet: bool = False,
-    fail_on_live: bool = True,
-):
-    live_lock, pid = profile_has_live_lock(profile_dir)
-
-    if (
-        live_lock
-        and os.getenv("FORCE_PROFILE_UNLOCK") != "1"
-        and fail_on_live
-    ):
-        raise RuntimeError(
-            f"Chrome profile already in use by pid {pid}: {profile_dir}"
-        )
-
-    if live_lock and os.getenv("FORCE_PROFILE_UNLOCK") != "1":
-        return
-
-    transient_names = {
-        "DevToolsActivePort",
-        "SingletonCookie",
-        "SingletonLock",
-        "SingletonSocket",
-        "lockfile",
-        "LOCK",
+    same_host = host in {
+        current_host,
+        "localhost",
     }
 
-    removed = []
-
-    for path in Path(profile_dir).rglob("*"):
-        if not path.exists():
-            continue
-
-        name = path.name
-
-        if name not in transient_names and not name.startswith("Singleton"):
-            continue
-
-        try:
-            if path.is_dir():
-                shutil.rmtree(path, ignore_errors=True)
-            else:
-                path.unlink(missing_ok=True)
-
-            removed.append(str(path))
-
-        except Exception as exc:
-            if logger:
-                logger.warning(
-                    "Could not remove stale profile artifact %s: %s",
-                    path,
-                    exc,
-                )
-
-    if removed and not quiet:
-        print("Removed stale Chromium runtime files")
+    return same_host and pid_is_alive(pid), pid
 
 
 def profile_process_pids(profile_dir):
@@ -349,7 +352,11 @@ def profile_process_pids(profile_dir):
             text=True,
             timeout=5,
         )
-    except (OSError, subprocess.TimeoutExpired):
+
+    except (
+        OSError,
+        subprocess.TimeoutExpired,
+    ):
         return []
 
     pids = []
@@ -357,8 +364,10 @@ def profile_process_pids(profile_dir):
     current_pid = os.getpid()
 
     for line in result.stdout.splitlines():
+
         try:
             pid = int(line.strip())
+
         except ValueError:
             continue
 
@@ -377,11 +386,16 @@ def terminate_profile_processes(profile_dir):
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
+
         except ProcessLookupError:
             pass
 
     for _ in range(20):
-        alive = [pid for pid in pids if pid_is_alive(pid)]
+
+        alive = [
+            pid for pid in pids
+            if pid_is_alive(pid)
+        ]
 
         if not alive:
             return
@@ -391,88 +405,121 @@ def terminate_profile_processes(profile_dir):
     for pid in pids:
         try:
             os.kill(pid, signal.SIGKILL)
+
         except ProcessLookupError:
             pass
 
 
-# =========================================================
-# VERSION DETECTION
-# =========================================================
+def cleanup_profile_runtime_artifacts(
+    profile_dir: Path,
+    logger: logging.Logger | None = None,
+    quiet: bool = False,
+    fail_on_live: bool = True,
+) -> None:
 
-def detect_browser_version(browser_binary: str) -> str | None:
-    if not browser_binary:
-        return None
+    live_lock, pid = profile_has_live_lock(profile_dir)
 
-    try:
-        result = subprocess.run(
-            [browser_binary, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
+    if (
+        live_lock
+        and os.environ.get(
+            "FORCE_PROFILE_UNLOCK",
+            "",
+        ).strip()
+        != "1"
+        and fail_on_live
+    ):
+        raise RuntimeError(
+            f"Chrome profile already open by pid {pid}: {profile_dir}"
         )
-    except Exception:
-        return None
 
-    raw = (result.stdout or result.stderr or "").strip()
+    if (
+        live_lock
+        and os.environ.get(
+            "FORCE_PROFILE_UNLOCK",
+            "",
+        ).strip()
+        != "1"
+    ):
+        return
 
-    match = re.search(r"(\d+\.\d+\.\d+\.\d+)", raw)
+    transient_names = {
+        "DevToolsActivePort",
+        "SingletonCookie",
+        "SingletonLock",
+        "SingletonSocket",
+        "lockfile",
+        "LOCK",
+    }
 
-    if match:
-        return match.group(1)
+    for path in Path(profile_dir).rglob("*"):
 
-    return None
+        if not path.exists():
+            continue
 
+        name = path.name
 
-def detect_browser_major_version(browser_binary: str) -> int | None:
-    env_version = os.getenv("CHROME_VERSION_MAIN")
+        if (
+            name not in transient_names
+            and not name.startswith("Singleton")
+        ):
+            continue
 
-    if env_version:
         try:
-            return int(env_version)
-        except Exception:
-            pass
 
-    version = detect_browser_version(browser_binary)
+            if path.is_dir():
+                shutil.rmtree(
+                    path,
+                    ignore_errors=True,
+                )
 
-    if not version:
-        return None
+            else:
+                path.unlink(missing_ok=True)
 
-    try:
-        return int(version.split(".", 1)[0])
-    except Exception:
-        return None
+        except Exception as exc:
 
+            if logger:
+                logger.warning(
+                    "Could not remove stale profile artifact %s: %s",
+                    path,
+                    exc,
+                )
 
-# =========================================================
-# OPTIONS
-# =========================================================
 
 def build_options(
     profile_dir: Path,
     fingerprint: dict,
     browser_version: str | None = None,
     *,
-    headless: bool = False,
+    headless: bool = True,
     preferred_binary: str = "",
 ):
+
     options = CHROME_OPTIONS_CLASS()
 
-    browser_binary = resolve_browser_binary(preferred_binary)
+    browser_binary = resolve_browser_binary(
+        preferred_binary
+    )
 
     if browser_binary:
         options.binary_location = browser_binary
 
-    width, height = resolve_window_size(fingerprint)
+    width, height = resolve_window_size(
+        fingerprint
+    )
 
     for argument in STATIC_CHROME_ARGUMENTS:
         options.add_argument(argument)
 
     for argument in EXTRA_CHROME_ARGUMENTS:
+
         if argument:
             options.add_argument(argument)
 
     for argument in parse_env_list(
-        os.getenv("ZARA_EXTRA_CHROME_ARGUMENTS", "")
+        os.environ.get(
+            "ZARA_EXTRA_CHROME_ARGUMENTS",
+            "",
+        )
     ):
         options.add_argument(argument)
 
@@ -493,7 +540,7 @@ def build_options(
     )
 
     options.add_argument(
-        "--profile-directory=Default"
+        f"--profile-directory={profile_directory_name()}"
     )
 
     options.add_argument(
@@ -506,66 +553,238 @@ def build_options(
     return options
 
 
-# =========================================================
-# FINGERPRINT PATCHING
-# =========================================================
+def detect_browser_version(
+    options,
+    preferred_binary: str = "",
+) -> str | None:
+
+    candidates = []
+
+    if getattr(options, "binary_location", None):
+        candidates.append(options.binary_location)
+
+    browser_binary = resolve_browser_binary(
+        preferred_binary
+    )
+
+    if browser_binary:
+        candidates.append(browser_binary)
+
+    seen: set[str] = set()
+
+    for candidate in candidates:
+
+        if not candidate or candidate in seen:
+            continue
+
+        seen.add(candidate)
+
+        if not Path(candidate).exists():
+            continue
+
+        try:
+            result = subprocess.run(
+                [candidate, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        except Exception:
+            continue
+
+        raw = (
+            result.stdout
+            or result.stderr
+            or ""
+        ).strip()
+
+        match = re.search(
+            r"(\d+\.\d+\.\d+\.\d+)",
+            raw,
+        )
+
+        if match:
+            return match.group(1)
+
+    return None
+
+
+def detect_browser_major_version(
+    browser_version: str | None,
+) -> int | None:
+
+    env_version = os.environ.get(
+        "CHROME_VERSION_MAIN",
+        "",
+    ).strip()
+
+    if env_version:
+        try:
+            return int(env_version)
+
+        except Exception:
+            pass
+
+    if not browser_version:
+        return None
+
+    try:
+        return int(
+            browser_version.split(".", 1)[0]
+        )
+
+    except Exception:
+        return None
+
 
 def apply_hardcoded_fingerprint(
     driver,
     fingerprint: dict,
     browser_version: str | None = None,
 ):
-    width, height = resolve_window_size(fingerprint)
+
+    width, height = resolve_window_size(
+        fingerprint
+    )
+
+    scale = int(
+        fingerprint.get(
+            "device_scale_factor",
+            DEFAULT_FINGERPRINT[
+                "device_scale_factor"
+            ],
+        )
+    )
+
+    language = str(
+        fingerprint.get(
+            "language",
+            DEFAULT_FINGERPRINT["language"],
+        )
+    )
+
+    languages = fingerprint.get(
+        "languages",
+        DEFAULT_FINGERPRINT["languages"],
+    )
+
+    if (
+        not isinstance(languages, list)
+        or not languages
+    ):
+        languages = list(
+            DEFAULT_FINGERPRINT["languages"]
+        )
 
     payload = {
         "user_agent": sync_user_agent(
-            str(fingerprint.get("user_agent", DEFAULT_FINGERPRINT["user_agent"])),
+            str(
+                fingerprint.get(
+                    "user_agent",
+                    DEFAULT_FINGERPRINT[
+                        "user_agent"
+                    ],
+                )
+            ),
             browser_version,
         ),
-        "language": str(fingerprint.get("language", DEFAULT_FINGERPRINT["language"])),
-        "languages": fingerprint.get("languages", DEFAULT_FINGERPRINT["languages"]),
-        "platform": str(fingerprint.get("platform", DEFAULT_FINGERPRINT["platform"])),
-        "vendor": str(fingerprint.get("vendor", DEFAULT_FINGERPRINT["vendor"])),
-        "timezone": str(fingerprint.get("timezone", DEFAULT_FINGERPRINT["timezone"])),
+        "language": language,
+        "languages": languages,
+        "platform": str(
+            fingerprint.get(
+                "platform",
+                DEFAULT_FINGERPRINT[
+                    "platform"
+                ],
+            )
+        ),
+        "vendor": str(
+            fingerprint.get(
+                "vendor",
+                DEFAULT_FINGERPRINT[
+                    "vendor"
+                ],
+            )
+        ),
+        "timezone": str(
+            fingerprint.get(
+                "timezone",
+                DEFAULT_FINGERPRINT[
+                    "timezone"
+                ],
+            )
+        ),
         "hardware_concurrency": int(
             fingerprint.get(
                 "hardware_concurrency",
-                DEFAULT_FINGERPRINT["hardware_concurrency"],
+                DEFAULT_FINGERPRINT[
+                    "hardware_concurrency"
+                ],
             )
         ),
         "device_memory": int(
             fingerprint.get(
                 "device_memory",
-                DEFAULT_FINGERPRINT["device_memory"],
+                DEFAULT_FINGERPRINT[
+                    "device_memory"
+                ],
             )
         ),
         "window_width": width,
         "window_height": height,
-        "device_scale_factor": int(
-            fingerprint.get(
-                "device_scale_factor",
-                DEFAULT_FINGERPRINT["device_scale_factor"],
-            )
-        ),
+        "device_scale_factor": scale,
     }
 
     try:
         driver.execute_cdp_cmd(
             "Network.setUserAgentOverride",
             {
-                "userAgent": payload["user_agent"],
-                "acceptLanguage": payload["language"],
-                "platform": payload["platform"],
+                "userAgent": payload[
+                    "user_agent"
+                ],
+                "acceptLanguage": payload[
+                    "language"
+                ],
+                "platform": payload[
+                    "platform"
+                ],
             },
         )
+
     except Exception:
         pass
 
     try:
         driver.execute_cdp_cmd(
             "Emulation.setTimezoneOverride",
-            {"timezoneId": payload["timezone"]},
+            {
+                "timezoneId": payload[
+                    "timezone"
+                ]
+            },
         )
+
+    except Exception:
+        pass
+
+    try:
+        driver.execute_cdp_cmd(
+            "Emulation.setDeviceMetricsOverride",
+            {
+                "width": payload[
+                    "window_width"
+                ],
+                "height": payload[
+                    "window_height"
+                ],
+                "deviceScaleFactor": payload[
+                    "device_scale_factor"
+                ],
+                "mobile": False,
+            },
+        )
+
     except Exception:
         pass
 
@@ -618,9 +837,15 @@ def apply_hardcoded_fingerprint(
                 const _resolvedOptions =
                     Intl.DateTimeFormat.prototype.resolvedOptions;
 
-                Intl.DateTimeFormat.prototype.resolvedOptions = function(...args) {{
-                    const result = _resolvedOptions.apply(this, args);
-                    result.timeZone = __headderfillFp.timezone;
+                Intl.DateTimeFormat.prototype.resolvedOptions =
+                    function(...args) {{
+
+                    const result =
+                        _resolvedOptions.apply(this, args);
+
+                    result.timeZone =
+                        __headderfillFp.timezone;
+
                     return result;
                 }};
 
@@ -628,23 +853,20 @@ def apply_hardcoded_fingerprint(
                     get: () => [1,2,3,4,5]
                 }});
 
-                window.chrome = window.chrome || {{
-                    runtime: {{}}
-                }};
+                window.chrome =
+                    window.chrome || {{
+                        runtime: {{}}
+                    }};
             """
         },
     )
 
 
-# =========================================================
-# BOOTSTRAP
-# =========================================================
-
 def bootstrap_driver(
     profile_dir: Path,
     data_dir: Path,
     *,
-    headless: bool = False,
+    headless: bool = True,
     preferred_binary: str = "",
     logger: logging.Logger | None = None,
 ) -> BrowserBootstrap:
@@ -652,8 +874,10 @@ def bootstrap_driver(
     profile_dir = Path(profile_dir).resolve()
     data_dir = Path(data_dir).resolve()
 
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+    profile_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     if logger:
         logger.info(
@@ -661,24 +885,32 @@ def bootstrap_driver(
             HEADDERFILL_VERSION,
         )
 
-    fingerprint = load_or_create_fingerprint(data_dir)
+    fingerprint = load_or_create_fingerprint(
+        data_dir
+    )
 
     cleanup_profile_runtime_artifacts(
         profile_dir,
         logger=logger,
     )
 
-    browser_binary = resolve_browser_binary(preferred_binary)
+    options = build_options(
+        profile_dir,
+        fingerprint,
+        None,
+        headless=headless,
+        preferred_binary=preferred_binary,
+    )
 
-    if not browser_binary:
-        raise FileNotFoundError(
-            "No Chromium/Chrome binary found"
+    browser_version = detect_browser_version(
+        options,
+        preferred_binary=preferred_binary,
+    )
+
+    browser_major_version = (
+        detect_browser_major_version(
+            browser_version
         )
-
-    browser_version = detect_browser_version(browser_binary)
-
-    browser_major_version = detect_browser_major_version(
-        browser_binary
     )
 
     options = build_options(
@@ -686,22 +918,27 @@ def bootstrap_driver(
         fingerprint,
         browser_version,
         headless=headless,
-        preferred_binary=browser_binary,
+        preferred_binary=preferred_binary,
     )
 
     driver = WEBDRIVER_FACTORY(
         options=options,
-        use_subprocess=True,
         version_main=browser_major_version,
+        use_subprocess=True,
     )
 
     window_size = (
         FORCE_WINDOW_SIZE_AFTER_START
-        or resolve_window_size(fingerprint)
+        or resolve_window_size(
+            fingerprint
+        )
     )
 
     try:
-        driver.set_window_size(*window_size)
+        driver.set_window_size(
+            *window_size
+        )
+
     except Exception:
         pass
 
@@ -715,73 +952,5 @@ def bootstrap_driver(
         driver=driver,
         fingerprint=fingerprint,
         browser_version=browser_version,
-        browser_major_version=browser_major_version,
         window_size=window_size,
     )
-
-
-# =========================================================
-# MAIN
-# =========================================================
-
-def main():
-    logger = logging.getLogger("headderfill")
-
-    bootstrap = bootstrap_driver(
-        profile_dir=Path(
-            os.getenv(
-                "USER_DATA_DIR",
-                "/home/dhruv/Desktop/chromium66",
-            )
-        ),
-        data_dir=Path("./data"),
-        headless=False,
-    )
-
-    driver = bootstrap.driver
-
-    try:
-        actions = new_actions(driver)
-
-        print("Browser version:", bootstrap.browser_version)
-        print("Browser major:", bootstrap.browser_major_version)
-        print("Window size:", bootstrap.window_size)
-
-        driver.get(
-            os.getenv(
-                "START_URL",
-                "https://google.com/",
-            )
-        )
-
-        input("press enter to exit")
-
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
-
-        terminate_profile_processes(
-            Path(
-                os.getenv(
-                    "USER_DATA_DIR",
-                    "/home/dhruv/Desktop/chromium66",
-                )
-            )
-        )
-
-        cleanup_profile_runtime_artifacts(
-            Path(
-                os.getenv(
-                    "USER_DATA_DIR",
-                    "/home/dhruv/Desktop/chromium66",
-                )
-            ),
-            quiet=True,
-            fail_on_live=False,
-        )
-
-
-if __name__ == "__main__":
-    main()
