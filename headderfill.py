@@ -54,7 +54,7 @@ import undetected_chromedriver as uc
 from selenium.webdriver.common.action_chains import ActionChains
 
 
-HEADDERFILL_VERSION = "sifihub-headderfill-live-2026-05-13-fixed"
+HEADDERFILL_VERSION = "sifihub-headderfill-live-2026-05-16-stale-profile-recovery"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -414,6 +414,107 @@ def profile_has_live_lock(profile_dir):
     )
 
 
+def should_kill_stale_profile_owner():
+    configured = os.environ.get(
+        "ZARA_KILL_STALE_PROFILE_OWNERS",
+        "",
+    ).strip().lower()
+
+    if configured:
+        return configured in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    return os.environ.get(
+        "GITHUB_ACTIONS",
+        "",
+    ).strip().lower() == "true"
+
+
+def terminate_profile_owner(pid, logger=None):
+    if not pid or pid == os.getpid():
+        return False
+
+    if os.name != "nt":
+        try:
+            command_line = (
+                Path(f"/proc/{pid}/cmdline")
+                .read_bytes()
+                .decode("utf-8", errors="ignore")
+                .replace("\x00", " ")
+                .lower()
+            )
+        except OSError:
+            command_line = ""
+        if command_line and not any(
+            marker in command_line
+            for marker in (
+                "chrome",
+                "chromium",
+                "chromedriver",
+                "undetected",
+            )
+        ):
+            if logger:
+                logger.warning(
+                    "Refusing to terminate non-browser profile owner %s: %s",
+                    pid,
+                    command_line[:160],
+                )
+            return False
+
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                [
+                    "taskkill",
+                    "/PID",
+                    str(pid),
+                    "/T",
+                    "/F",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        else:
+            os.kill(
+                pid,
+                signal.SIGTERM,
+            )
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if not pid_is_alive(pid):
+                    break
+                time.sleep(0.25)
+            if pid_is_alive(pid):
+                os.kill(
+                    pid,
+                    signal.SIGKILL,
+                )
+    except ProcessLookupError:
+        return True
+    except Exception as exc:
+        if logger:
+            logger.warning(
+                "Could not terminate stale Chrome profile owner %s: %s",
+                pid,
+                exc,
+            )
+        return False
+
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        if not pid_is_alive(pid):
+            return True
+        time.sleep(0.2)
+    return not pid_is_alive(pid)
+
+
 def cleanup_profile_runtime_artifacts(
     profile_dir: Path,
     logger=None,
@@ -425,18 +526,27 @@ def cleanup_profile_runtime_artifacts(
         )
     )
 
-    if (
-        live_lock
-        and os.environ.get(
-            "FORCE_PROFILE_UNLOCK",
-            "",
-        ).strip()
-        != "1"
-    ):
-        raise RuntimeError(
-            f"Chrome profile already open "
-            f"by pid {pid}: {profile_dir}"
+    if live_lock:
+        force_unlock = (
+            os.environ.get(
+                "FORCE_PROFILE_UNLOCK",
+                "",
+            ).strip()
+            == "1"
         )
+        if not force_unlock:
+            if should_kill_stale_profile_owner() and terminate_profile_owner(pid, logger=logger):
+                if logger:
+                    logger.warning(
+                        "Terminated stale Chrome profile owner %s for %s",
+                        pid,
+                        profile_dir,
+                    )
+            else:
+                raise RuntimeError(
+                    f"Chrome profile already open "
+                    f"by pid {pid}: {profile_dir}"
+                )
 
     transient_names = {
         "DevToolsActivePort",
